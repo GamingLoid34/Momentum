@@ -110,31 +110,37 @@ function isSameDay(a: Date, b: Date) {
 }
 
 export function MomentumProvider({ children }: { children: React.ReactNode }) {
+  const services = useMemo(() => getFirebaseServices(), []);
+  const { auth, db, missingConfig } = services;
+  const hasFirebaseConfigIssue = missingConfig.length > 0 || !auth || !db;
+
   const [user, setUser] = useState<User | null>(null);
   const [tasks, setTasks] = useState<MicroTask[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [firebaseReady, setFirebaseReady] = useState(false);
+  const [loading, setLoading] = useState(!hasFirebaseConfigIssue);
+  const [error, setError] = useState<string | null>(
+    hasFirebaseConfigIssue
+      ? "Firebase är inte korrekt konfigurerat. Kontrollera .env.local och följ README."
+      : null
+  );
   const [visionFeedback, setVisionFeedback] = useState<VisionFeedback | null>(
     null
   );
-
-  const services = useMemo(() => getFirebaseServices(), []);
-  const { auth, db, missingConfig } = services;
+  const firebaseReady = !hasFirebaseConfigIssue;
 
   useEffect(() => {
-    if (missingConfig.length > 0 || !auth || !db) {
-      setError(
-        "Firebase är inte korrekt konfigurerat. Kontrollera .env.local och följ README."
-      );
-      setLoading(false);
+    if (!firebaseReady || !auth) {
       return;
     }
 
-    setFirebaseReady(true);
-
     const unsubscribe = onAuthStateChanged(auth, (authUser) => {
       setUser(authUser);
+      if (!authUser) {
+        setTasks([]);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
     });
 
     if (!auth.currentUser) {
@@ -148,18 +154,13 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     }
 
     return unsubscribe;
-  }, [auth, db, missingConfig]);
+  }, [auth, firebaseReady]);
 
   useEffect(() => {
-    if (!db || !user) {
-      setTasks([]);
-      if (firebaseReady) {
-        setLoading(false);
-      }
+    if (!firebaseReady || !db || !user) {
       return;
     }
 
-    setLoading(true);
     const tasksRef = collection(db, "users", user.uid, "microTasks");
     const tasksQuery = query(tasksRef, orderBy("createdAt", "asc"));
 
@@ -194,7 +195,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
   }, [db, firebaseReady, user]);
 
   const guardOperational = useCallback(() => {
-    if (!db || !user) {
+    if (!firebaseReady || !db || !user) {
       throw new Error(
         "Momentum är inte redo ännu. Vänta tills Firebase-synken är igång."
       );
@@ -204,7 +205,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       db,
       uid: user.uid,
     };
-  }, [db, user]);
+  }, [db, firebaseReady, user]);
 
   const createTask = useCallback(
     async (title: string, estimatedMinutes = DEFAULT_STEP_MINUTES) => {
@@ -301,9 +302,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
   const analyzeWithVisionMode = useCallback(
     async (imageDataUrl: string, goal?: string) => {
-      const { db: activeDb, uid } = guardOperational();
-      void activeDb;
-      void uid;
+      guardOperational();
 
       const response = await fetch("/api/ai/vision-mode", {
         method: "POST",
