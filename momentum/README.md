@@ -44,6 +44,7 @@ Denna är **hemlig** och får aldrig exponeras i klienten:
 - Anrop sker via:
   - `POST /api/ai/split-task`
   - `POST /api/ai/vision-mode`
+- API-routes har grundläggande rate limiting per IP för att minska missbruk.
 
 ## 3) Firebase setup (rekommenderad)
 

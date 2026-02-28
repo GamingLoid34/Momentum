@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requestGeminiJson } from "@/lib/gemini";
+import { enforceRateLimit, getClientIp } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,8 @@ type VisionModeResponse = {
 
 const IMAGE_DATA_URL_REGEX = /^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/;
 const MAX_BASE64_SIZE = 7_500_000;
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT_MAX_REQUESTS = 10;
 
 function sanitizeMicroSteps(value: unknown) {
   if (!Array.isArray(value)) {
@@ -33,6 +36,30 @@ function sanitizeMicroSteps(value: unknown) {
 
 export async function POST(req: Request) {
   try {
+    const clientIp = getClientIp(req);
+    const rateLimit = enforceRateLimit(
+      `vision-mode:${clientIp}`,
+      RATE_LIMIT_MAX_REQUESTS,
+      RATE_LIMIT_WINDOW_MS
+    );
+    if (!rateLimit.allowed) {
+      return NextResponse.json<VisionModeResponse>(
+        {
+          error: "Too many requests. Please wait a few minutes and try again.",
+        },
+        {
+          status: 429,
+          headers: {
+            "X-RateLimit-Limit": RATE_LIMIT_MAX_REQUESTS.toString(),
+            "X-RateLimit-Remaining": rateLimit.remaining.toString(),
+            "X-RateLimit-Reset": Math.ceil(
+              rateLimit.resetAt / 1000
+            ).toString(),
+          },
+        }
+      );
+    }
+
     const body = (await req.json()) as VisionModeRequest;
     const rawImage = body.imageDataUrl?.trim() ?? "";
     const goal = body.goal?.trim();
@@ -101,13 +128,22 @@ Return strict JSON with exactly this shape:
       );
     }
 
-    return NextResponse.json<VisionModeResponse>({
-      result: {
-        firstAction,
-        microSteps,
-        encouragement,
+    return NextResponse.json<VisionModeResponse>(
+      {
+        result: {
+          firstAction,
+          microSteps,
+          encouragement,
+        },
       },
-    });
+      {
+        headers: {
+          "X-RateLimit-Limit": RATE_LIMIT_MAX_REQUESTS.toString(),
+          "X-RateLimit-Remaining": rateLimit.remaining.toString(),
+          "X-RateLimit-Reset": Math.ceil(rateLimit.resetAt / 1000).toString(),
+        },
+      }
+    );
   } catch (error) {
     console.error("[vision-mode]", error);
     return NextResponse.json<VisionModeResponse>(
