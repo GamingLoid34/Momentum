@@ -2,6 +2,7 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { useMomentum } from "@/context/MomentumContext";
+import { InstallPwaButton } from "@/components/pwa/InstallPwaButton";
 
 type PendingAction = "idle" | "creating" | "splitting" | "vision";
 
@@ -131,6 +132,7 @@ export function MomentumDashboard() {
           Bryt ned motståndet med mikro-steg, AI-analys och realtidssynk. Målet
           är enkelt: börja med minsta möjliga steg och bygg momentum därifrån.
         </p>
+        <InstallPwaButton />
       </header>
 
       {!firebaseReady && (

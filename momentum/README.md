@@ -74,7 +74,28 @@ npm run dev
 
 Öppna `http://localhost:3000`.
 
-## 5) Projektstruktur
+## 5) PWA-läge (mobilkänsla)
+
+Projektet innehåller nu:
+
+- Web App Manifest (`src/app/manifest.ts`)
+- Service Worker (`public/sw.js`)
+- Offline-sida (`/offline`)
+- Install-knapp när `beforeinstallprompt` stöds
+
+För att verifiera installbarhet:
+
+1. Kör en produktionsbuild lokalt:
+
+   ```bash
+   npm run build
+   npm run start
+   ```
+
+2. Öppna appen i mobilbrowser via HTTPS-url (deployment) eller via lokal tunnel.
+3. Välj "Installera app" / "Lägg till på hemskärmen".
+
+## 6) Projektstruktur
 
 - `src/firebase/index.ts` – robust Firebase-initiering
 - `src/context/MomentumContext.tsx` – realtime state + actions
@@ -82,7 +103,30 @@ npm run dev
 - `src/app/api/ai/vision-mode/route.ts` – Gemini bildanalys
 - `src/components/momentum/MomentumDashboard.tsx` – UI bootstrap
 
-## 6) Redo för senare Google Play
+## 7) Deploy (Vercel eller Firebase)
+
+### Alternativ A: Vercel (enklast för Next.js + API routes)
+
+1. Importera repo i Vercel.
+2. Sätt root directory till `momentum/`.
+3. Lägg in alla env-variabler i Vercel Project Settings.
+4. Deploy.
+
+### Alternativ B: Firebase
+
+Ja, du kan publicera via Firebase, men välj rätt produkt:
+
+- **Firebase App Hosting** (rekommenderat för den här appen)
+  - Stödjer Next.js med server-side routes (`/api/...`).
+  - Koppla GitHub-repo, välj `momentum/` som app-root och sätt env-variabler i App Hosting.
+
+- **Firebase Hosting (statisk)**
+  - Passar endast statisk export.
+  - Räcker inte för denna kodbas utan extra backend, eftersom Gemini-anropen körs säkert i server-routes.
+
+Om du vill använda klassisk Firebase Hosting behöver du flytta API-logik till Cloud Functions/Cloud Run.
+
+## 8) Redo för senare Google Play
 
 För publicering via Google Play senare rekommenderas:
 
