@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function OfflinePage() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-4 px-6 text-center">
@@ -9,12 +11,12 @@ export default function OfflinePage() {
         Momentum försöker ansluta igen automatiskt. När internet är tillbaka kan du
         fortsätta med AI Task Splitting och Vision Mode.
       </p>
-      <a
+      <Link
         href="/"
         className="mt-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500"
       >
         Försök igen
-      </a>
+      </Link>
     </main>
   );
 }
