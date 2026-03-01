@@ -281,18 +281,19 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       }
 
       const nextTasks = ((subtaskRows ?? []) as SupabaseSubtaskRow[]).map(
-        (row) => ({
-          id: row.id,
-          title: row.title ?? "Untitled step",
-          parentTaskId: row.task_id,
-          parentTaskTitle:
-            taskNameById.get(row.task_id) ?? "Uppgift utan rubrik",
-          estimatedMinutes: normalizeMinutes(row.estimated_minutes ?? 10),
-          status: row.is_completed ? "done" : "todo",
-          aiMotivation: row.ai_motivation,
-          createdAt: row.created_at,
-          completedAt: row.completed_at,
-        })
+        (row) =>
+          ({
+            id: row.id,
+            title: row.title ?? "Untitled step",
+            parentTaskId: row.task_id,
+            parentTaskTitle:
+              taskNameById.get(row.task_id) ?? "Uppgift utan rubrik",
+            estimatedMinutes: normalizeMinutes(row.estimated_minutes ?? 10),
+            status: row.is_completed ? "done" : "todo",
+            aiMotivation: row.ai_motivation,
+            createdAt: row.created_at,
+            completedAt: row.completed_at,
+          }) satisfies MicroTask
       );
 
       setTasks(nextTasks);
