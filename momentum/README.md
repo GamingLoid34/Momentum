@@ -139,3 +139,18 @@ När deployment är klar: öppna app-url och testa login via magic link.
    - privacy policy
    - data safety declaration
    - app signing + release process
+
+## Felsökning
+
+### "stack depth limit exceeded" efter inloggning
+
+Orsak: RLS-recursion i äldre SQL-version.
+
+Lösning:
+
+1. Öppna Supabase → SQL Editor.
+2. Kör filen:
+
+   `supabase/fixes/2026-03-01-stack-depth-hotfix.sql`
+
+3. Ladda om appen.
