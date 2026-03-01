@@ -2,15 +2,54 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { InstallPwaButton } from "@/components/pwa/InstallPwaButton";
-import { SplitTaskStep, useMomentum } from "@/context/MomentumContext";
+import {
+  SplitTaskStep,
+  WorkTask,
+  WorkTaskStatus,
+  useMomentum,
+} from "@/context/MomentumContext";
 
 type PendingAction =
   | "idle"
   | "auth"
   | "creating"
+  | "movingTask"
   | "splitting"
   | "savingSplit"
   | "vision";
+
+const KANBAN_COLUMNS: Array<{
+  status: WorkTaskStatus;
+  title: string;
+  accentClass: string;
+}> = [
+  {
+    status: "todo",
+    title: "Att göra",
+    accentClass: "text-sky-300 border-sky-700/40 bg-sky-900/20",
+  },
+  {
+    status: "in_progress",
+    title: "Pågående",
+    accentClass: "text-amber-300 border-amber-700/40 bg-amber-900/20",
+  },
+  {
+    status: "done",
+    title: "Klart",
+    accentClass: "text-emerald-300 border-emerald-700/40 bg-emerald-900/20",
+  },
+];
+
+function formatDate(isoDate: string | null) {
+  if (!isoDate) {
+    return "—";
+  }
+
+  const date = new Date(isoDate);
+  return `${date.getFullYear()}-${(date.getMonth() + 1)
+    .toString()
+    .padStart(2, "0")}-${date.getDate().toString().padStart(2, "0")}`;
+}
 
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -31,6 +70,7 @@ function readFileAsDataUrl(file: File) {
 export function MomentumDashboard() {
   const {
     user,
+    workTasks,
     tasks,
     loading,
     supabaseReady,
@@ -42,6 +82,7 @@ export function MomentumDashboard() {
     sendMagicLink,
     signOut,
     createTask,
+    updateWorkTaskStatus,
     splitTaskWithAI,
     saveSplitTask,
     toggleTaskCompletion,
@@ -71,6 +112,20 @@ export function MomentumDashboard() {
     () => tasks.filter((task) => task.status === "done").length,
     [tasks]
   );
+
+  const tasksByStatus = useMemo<Record<WorkTaskStatus, WorkTask[]>>(() => {
+    const buckets: Record<WorkTaskStatus, WorkTask[]> = {
+      todo: [],
+      in_progress: [],
+      done: [],
+    };
+
+    workTasks.forEach((task) => {
+      buckets[task.status].push(task);
+    });
+
+    return buckets;
+  }, [workTasks]);
 
   async function handleSendMagicLink(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -174,6 +229,23 @@ export function MomentumDashboard() {
         visionError instanceof Error
           ? visionError.message
           : "Vision Mode misslyckades."
+      );
+    } finally {
+      setPendingAction("idle");
+    }
+  }
+
+  async function handleMoveWorkTask(taskId: string, status: WorkTaskStatus) {
+    setLocalMessage(null);
+    setPendingAction("movingTask");
+    try {
+      await updateWorkTaskStatus(taskId, status);
+      setLocalMessage("Uppgiftens kolumn uppdaterades.");
+    } catch (moveError) {
+      setLocalMessage(
+        moveError instanceof Error
+          ? moveError.message
+          : "Kunde inte flytta uppgiften."
       );
     } finally {
       setPendingAction("idle");
@@ -315,6 +387,106 @@ export function MomentumDashboard() {
           {localMessage}
         </section>
       )}
+
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-medium text-zinc-100">
+            Koll-board (Kanban)
+          </h2>
+          <p className="text-xs text-zinc-400">
+            Totala uppgifter: {workTasks.length}
+          </p>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-3">
+          {KANBAN_COLUMNS.map((column) => (
+            <article
+              key={column.status}
+              className={`rounded-xl border p-3 ${column.accentClass}`}
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">{column.title}</h3>
+                <span className="rounded-full border border-white/20 px-2 py-0.5 text-xs text-zinc-100">
+                  {tasksByStatus[column.status].length}
+                </span>
+              </div>
+
+              {tasksByStatus[column.status].length === 0 ? (
+                <p className="text-xs text-zinc-300/80">Inga uppgifter här.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {tasksByStatus[column.status].map((task) => {
+                    const progressPct =
+                      task.subtaskTotal > 0
+                        ? Math.round(
+                            (task.subtaskCompleted / task.subtaskTotal) * 100
+                          )
+                        : 0;
+
+                    return (
+                      <li
+                        key={task.id}
+                        className="rounded-lg border border-zinc-700 bg-zinc-950/60 p-3 text-zinc-100"
+                      >
+                        <p className="truncate text-sm font-medium">{task.title}</p>
+                        <p className="mt-1 text-xs text-zinc-400">
+                          Deadline: {formatDate(task.deadline)}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          Delsteg klara: {task.subtaskCompleted}/{task.subtaskTotal}
+                        </p>
+                        <div className="mt-2 h-1.5 w-full overflow-hidden rounded bg-zinc-800">
+                          <div
+                            className="h-full rounded bg-violet-500"
+                            style={{ width: `${Math.min(100, progressPct)}%` }}
+                          />
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {task.status !== "todo" && (
+                            <button
+                              type="button"
+                              disabled={pendingAction !== "idle"}
+                              onClick={() => {
+                                void handleMoveWorkTask(task.id, "todo");
+                              }}
+                              className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Till att göra
+                            </button>
+                          )}
+                          {task.status !== "in_progress" && (
+                            <button
+                              type="button"
+                              disabled={pendingAction !== "idle"}
+                              onClick={() => {
+                                void handleMoveWorkTask(task.id, "in_progress");
+                              }}
+                              className="rounded-md border border-amber-400/40 px-2 py-1 text-xs text-amber-200 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Till pågående
+                            </button>
+                          )}
+                          {task.status !== "done" && (
+                            <button
+                              type="button"
+                              disabled={pendingAction !== "idle"}
+                              onClick={() => {
+                                void handleMoveWorkTask(task.id, "done");
+                              }}
+                              className="rounded-md border border-emerald-400/40 px-2 py-1 text-xs text-emerald-200 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Markera klar
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </article>
+          ))}
+        </div>
+      </section>
 
       <section className="grid gap-6 lg:grid-cols-[2fr_1fr]">
         <div className="space-y-6">

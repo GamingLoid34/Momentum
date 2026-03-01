@@ -12,6 +12,22 @@ import { User } from "@supabase/supabase-js";
 import { getSupabaseServices } from "@/lib/supabase";
 
 export type TaskStatus = "todo" | "done";
+export type WorkTaskStatus = "todo" | "in_progress" | "done";
+
+export type WorkTask = {
+  id: string;
+  title: string;
+  description: string;
+  status: WorkTaskStatus;
+  source: string;
+  startDate: string | null;
+  deadline: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  subtaskTotal: number;
+  subtaskCompleted: number;
+  mainAssigneeUserId: string | null;
+};
 
 export type MicroTask = {
   id: string;
@@ -39,6 +55,7 @@ export type SplitTaskStep = {
 
 type MomentumContextValue = {
   user: User | null;
+  workTasks: WorkTask[];
   tasks: MicroTask[];
   loading: boolean;
   supabaseReady: boolean;
@@ -50,6 +67,7 @@ type MomentumContextValue = {
   sendMagicLink: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   createTask: (title: string, estimatedMinutes?: number) => Promise<void>;
+  updateWorkTaskStatus: (taskId: string, status: WorkTaskStatus) => Promise<void>;
   splitTaskWithAI: (task: string) => Promise<SplitTaskStep[]>;
   saveSplitTask: (taskTitle: string, steps: SplitTaskStep[]) => Promise<void>;
   toggleTaskCompletion: (
@@ -69,6 +87,13 @@ type SupabaseTaskRow = {
   id: string;
   title: string;
   team_id: string;
+  description: string | null;
+  status: WorkTaskStatus | null;
+  source: string | null;
+  start_date: string | null;
+  deadline: string | null;
+  completed_at: string | null;
+  created_at: string;
 };
 
 type SupabaseSubtaskRow = {
@@ -80,6 +105,12 @@ type SupabaseSubtaskRow = {
   ai_motivation: string | null;
   created_at: string;
   completed_at: string | null;
+};
+
+type SupabaseMainAssigneeRow = {
+  task_id: string;
+  user_id: string;
+  is_main: boolean;
 };
 
 const DEFAULT_STEP_MINUTES = 10;
@@ -118,6 +149,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
   const [user, setUser] = useState<User | null>(null);
   const [teamId, setTeamId] = useState<string | null>(null);
+  const [workTasks, setWorkTasks] = useState<WorkTask[]>([]);
   const [tasks, setTasks] = useState<MicroTask[]>([]);
   const [loading, setLoading] = useState(!hasSupabaseConfigIssue);
   const [error, setError] = useState<string | null>(
@@ -152,6 +184,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
       if (!sessionUser) {
         setTeamId(null);
+        setWorkTasks([]);
         setTasks([]);
         setLoading(false);
       } else {
@@ -169,6 +202,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
       if (!nextUser) {
         setTeamId(null);
+        setWorkTasks([]);
         setTasks([]);
         setLoading(false);
         return;
@@ -238,7 +272,9 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     const fetchTasks = async () => {
       const { data: taskRows, error: taskError } = await supabase
         .from("tasks")
-        .select("id, title, team_id")
+        .select(
+          "id, title, team_id, description, status, source, start_date, deadline, completed_at, created_at"
+        )
         .eq("team_id", teamId)
         .order("created_at", { ascending: true });
 
@@ -254,6 +290,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
       const typedTaskRows = (taskRows ?? []) as SupabaseTaskRow[];
       if (typedTaskRows.length === 0) {
+        setWorkTasks([]);
         setTasks([]);
         setLoading(false);
         return;
@@ -261,6 +298,29 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
       const taskIds = typedTaskRows.map((taskRow) => taskRow.id);
       const taskNameById = new Map(typedTaskRows.map((row) => [row.id, row.title]));
+
+      const { data: assigneeRows, error: assigneeError } = await supabase
+        .from("task_assignees")
+        .select("task_id, user_id, is_main")
+        .in("task_id", taskIds)
+        .eq("is_main", true);
+
+      if (!isSubscribed) {
+        return;
+      }
+
+      if (assigneeError) {
+        setError(assigneeError.message);
+        setLoading(false);
+        return;
+      }
+
+      const mainAssigneeByTaskId = new Map(
+        ((assigneeRows ?? []) as SupabaseMainAssigneeRow[]).map((row) => [
+          row.task_id,
+          row.user_id,
+        ])
+      );
 
       const { data: subtaskRows, error: subtaskError } = await supabase
         .from("subtasks")
@@ -280,6 +340,45 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const subtaskStatsByTaskId = new Map<
+        string,
+        {
+          total: number;
+          completed: number;
+        }
+      >();
+
+      ((subtaskRows ?? []) as SupabaseSubtaskRow[]).forEach((row) => {
+        const existing = subtaskStatsByTaskId.get(row.task_id) ?? {
+          total: 0,
+          completed: 0,
+        };
+        existing.total += 1;
+        if (row.is_completed) {
+          existing.completed += 1;
+        }
+        subtaskStatsByTaskId.set(row.task_id, existing);
+      });
+
+      const nextWorkTasks = typedTaskRows.map(
+        (row) =>
+          ({
+            id: row.id,
+            title: row.title ?? "Uppgift utan rubrik",
+            description: row.description ?? "",
+            status: row.status ?? "todo",
+            source: row.source ?? "app",
+            startDate: row.start_date,
+            deadline: row.deadline,
+            completedAt: row.completed_at,
+            createdAt: row.created_at,
+            subtaskTotal: subtaskStatsByTaskId.get(row.id)?.total ?? 0,
+            subtaskCompleted:
+              subtaskStatsByTaskId.get(row.id)?.completed ?? 0,
+            mainAssigneeUserId: mainAssigneeByTaskId.get(row.id) ?? null,
+          }) satisfies WorkTask
+      );
+
       const nextTasks = ((subtaskRows ?? []) as SupabaseSubtaskRow[]).map(
         (row) =>
           ({
@@ -296,6 +395,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
           }) satisfies MicroTask
       );
 
+      setWorkTasks(nextWorkTasks);
       setTasks(nextTasks);
       setLoading(false);
     };
@@ -425,9 +525,29 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       throw new Error(signOutError.message);
     }
 
+    setWorkTasks([]);
     setTasks([]);
     setTeamId(null);
   }, [supabase, supabaseReady]);
+
+  const updateWorkTaskStatus = useCallback(
+    async (taskId: string, status: WorkTaskStatus) => {
+      const { supabase: activeSupabase } = guardOperational();
+
+      const { error: updateError } = await activeSupabase
+        .from("tasks")
+        .update({
+          status,
+          completed_at: status === "done" ? new Date().toISOString() : null,
+        })
+        .eq("id", taskId);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
+    },
+    [guardOperational]
+  );
 
   const createTask = useCallback(
     async (title: string, estimatedMinutes = DEFAULT_STEP_MINUTES) => {
@@ -712,6 +832,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<MomentumContextValue>(
     () => ({
       user,
+      workTasks,
       tasks,
       loading,
       supabaseReady,
@@ -723,6 +844,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       sendMagicLink,
       signOut,
       createTask,
+      updateWorkTaskStatus,
       splitTaskWithAI,
       saveSplitTask,
       toggleTaskCompletion,
@@ -739,6 +861,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       flowByHour,
       loading,
       momentumScore,
+      updateWorkTaskStatus,
       removeTask,
       saveSplitTask,
       sendMagicLink,
@@ -746,6 +869,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       splitTaskWithAI,
       supabaseReady,
       tasks,
+      workTasks,
       toggleTaskCompletion,
       user,
       visionFeedback,
