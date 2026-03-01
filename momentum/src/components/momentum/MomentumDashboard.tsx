@@ -1,10 +1,16 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { useMomentum } from "@/context/MomentumContext";
 import { InstallPwaButton } from "@/components/pwa/InstallPwaButton";
+import { SplitTaskStep, useMomentum } from "@/context/MomentumContext";
 
-type PendingAction = "idle" | "creating" | "splitting" | "vision";
+type PendingAction =
+  | "idle"
+  | "auth"
+  | "creating"
+  | "splitting"
+  | "savingSplit"
+  | "vision";
 
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -28,24 +34,33 @@ export function MomentumDashboard() {
     tasks,
     loading,
     supabaseReady,
+    emailAuthEnabled,
     error,
     visionFeedback,
     momentumScore,
     flowByHour,
+    sendMagicLink,
+    signOut,
     createTask,
     splitTaskWithAI,
+    saveSplitTask,
     toggleTaskCompletion,
     removeTask,
     analyzeWithVisionMode,
     clearError,
   } = useMomentum();
 
+  const [authEmail, setAuthEmail] = useState("");
   const [manualTask, setManualTask] = useState("");
   const [aiTask, setAiTask] = useState("");
   const [visionGoal, setVisionGoal] = useState("");
   const [visionFile, setVisionFile] = useState<File | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>("idle");
   const [localMessage, setLocalMessage] = useState<string | null>(null);
+  const [aiPreview, setAiPreview] = useState<{
+    taskTitle: string;
+    steps: SplitTaskStep[];
+  } | null>(null);
 
   const maxFlowValue = useMemo(() => {
     const highest = Math.max(...flowByHour, 0);
@@ -57,6 +72,24 @@ export function MomentumDashboard() {
     [tasks]
   );
 
+  async function handleSendMagicLink(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setLocalMessage(null);
+    setPendingAction("auth");
+    try {
+      await sendMagicLink(authEmail);
+      setLocalMessage(
+        "Magic link skickad. Öppna mejlet och klicka på länken för att logga in."
+      );
+    } catch (authError) {
+      setLocalMessage(
+        authError instanceof Error ? authError.message : "Kunde inte skicka login-länk."
+      );
+    } finally {
+      setPendingAction("idle");
+    }
+  }
+
   async function handleCreateTask(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setLocalMessage(null);
@@ -64,7 +97,7 @@ export function MomentumDashboard() {
     try {
       await createTask(manualTask);
       setManualTask("");
-      setLocalMessage("Mikro-uppgift skapad.");
+      setLocalMessage("Uppgift skapad med ett första mikro-steg.");
     } catch (createError) {
       setLocalMessage(
         createError instanceof Error
@@ -81,14 +114,42 @@ export function MomentumDashboard() {
     setLocalMessage(null);
     setPendingAction("splitting");
     try {
-      await splitTaskWithAI(aiTask);
-      setAiTask("");
-      setLocalMessage("AI bröt ner uppgiften till mikro-steg.");
+      const steps = await splitTaskWithAI(aiTask);
+      setAiPreview({
+        taskTitle: aiTask.trim(),
+        steps,
+      });
+      setLocalMessage(
+        "AI-förslag klart. Granska stegen och spara när du är nöjd."
+      );
     } catch (splitError) {
       setLocalMessage(
         splitError instanceof Error
           ? splitError.message
           : "Kunde inte dela upp uppgiften."
+      );
+    } finally {
+      setPendingAction("idle");
+    }
+  }
+
+  async function handleSaveSplit() {
+    if (!aiPreview) {
+      return;
+    }
+
+    setLocalMessage(null);
+    setPendingAction("savingSplit");
+    try {
+      await saveSplitTask(aiPreview.taskTitle, aiPreview.steps);
+      setAiTask("");
+      setAiPreview(null);
+      setLocalMessage("AI-stegen sparades till din planering.");
+    } catch (saveError) {
+      setLocalMessage(
+        saveError instanceof Error
+          ? saveError.message
+          : "Kunde inte spara AI-stegen."
       );
     } finally {
       setPendingAction("idle");
@@ -119,29 +180,122 @@ export function MomentumDashboard() {
     }
   }
 
+  if (!user) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-6 px-4 py-8 md:px-8">
+        <header className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6 shadow-lg shadow-black/20">
+          <p className="text-xs uppercase tracking-[0.2em] text-violet-300">
+            Momentum + Koll
+          </p>
+          <h1 className="mt-2 text-3xl font-semibold text-zinc-100">
+            Logga in med e-post
+          </h1>
+          <p className="mt-3 text-sm text-zinc-400">
+            Vi kör magic link utan lösenord. Du får en länk via mejl och kommer
+            direkt in i appen.
+          </p>
+          <InstallPwaButton />
+        </header>
+
+        {!supabaseReady && (
+          <section className="rounded-2xl border border-amber-600/30 bg-amber-900/20 p-4 text-sm text-amber-100">
+            Supabase är inte konfigurerat ännu. Lägg in värden i{" "}
+            <code className="rounded bg-black/40 px-1.5 py-0.5">
+              .env.local
+            </code>{" "}
+            enligt{" "}
+            <code className="rounded bg-black/40 px-1.5 py-0.5">
+              .env.example
+            </code>
+            .
+          </section>
+        )}
+
+        {error && (
+          <section className="flex items-start justify-between gap-4 rounded-2xl border border-rose-600/30 bg-rose-900/20 p-4 text-sm text-rose-100">
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={clearError}
+              className="rounded-lg border border-rose-300/20 px-3 py-1 text-xs hover:bg-rose-500/20"
+            >
+              Stäng
+            </button>
+          </section>
+        )}
+
+        {localMessage && (
+          <section className="rounded-2xl border border-violet-500/30 bg-violet-900/20 p-3 text-sm text-violet-100">
+            {localMessage}
+          </section>
+        )}
+
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6">
+          <h2 className="text-lg font-medium text-zinc-100">
+            Fortsätt med e-post
+          </h2>
+          <p className="mt-1 text-sm text-zinc-400">
+            {emailAuthEnabled
+              ? "Skriv in din e-post så skickar vi en säker inloggningslänk."
+              : "E-postinloggning är inte aktiverad ännu."}
+          </p>
+
+          <form onSubmit={handleSendMagicLink} className="mt-4 space-y-3">
+            <input
+              type="email"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              placeholder="du@foretag.se"
+              className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-violet-500"
+              required
+            />
+            <button
+              type="submit"
+              disabled={pendingAction !== "idle"}
+              className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {pendingAction === "auth"
+                ? "Skickar länk..."
+                : "Skicka magic link"}
+            </button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-4 py-8 md:px-8">
       <header className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-6 shadow-lg shadow-black/20">
         <p className="text-xs uppercase tracking-[0.2em] text-violet-300">
-          Momentum
+          Momentum + Koll
         </p>
         <h1 className="mt-2 text-3xl font-semibold text-zinc-100">
-          Din AI-coach mot prokrastinering
+          Planera och gör jobbet i samma app
         </h1>
         <p className="mt-3 max-w-3xl text-sm text-zinc-400">
-          Bryt ned motståndet med mikro-steg, AI-analys och realtidssynk. Målet
-          är enkelt: börja med minsta möjliga steg och bygg momentum därifrån.
+          Planera uppgifter med tydliga deadlines och bryt sedan ner dem till
+          mikro-steg med AI. Spara först efter granskning.
         </p>
-        <InstallPwaButton />
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <InstallPwaButton />
+          <button
+            type="button"
+            onClick={() => {
+              void signOut().catch((signOutError) =>
+                setLocalMessage(
+                  signOutError instanceof Error
+                    ? signOutError.message
+                    : "Kunde inte logga ut."
+                )
+              );
+            }}
+            className="rounded-xl border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-200 transition hover:bg-zinc-800"
+          >
+            Logga ut
+          </button>
+        </div>
       </header>
-
-      {!supabaseReady && (
-        <section className="rounded-2xl border border-amber-600/30 bg-amber-900/20 p-4 text-sm text-amber-100">
-          Supabase är inte konfigurerat ännu. Lägg in värden i{" "}
-          <code className="rounded bg-black/40 px-1.5 py-0.5">.env.local</code>{" "}
-          enligt <code className="rounded bg-black/40 px-1.5 py-0.5">.env.example</code>.
-        </section>
-      )}
 
       {error && (
         <section className="flex items-start justify-between gap-4 rounded-2xl border border-rose-600/30 bg-rose-900/20 p-4 text-sm text-rose-100">
@@ -166,13 +320,16 @@ export function MomentumDashboard() {
         <div className="space-y-6">
           <article className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
             <h2 className="text-lg font-medium text-zinc-100">
-              Snabbstart: skapa en mikro-uppgift
+              Snabbstart: skapa uppgift
             </h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              Vi skapar en huvuduppgift och ett första delsteg direkt.
+            </p>
             <form onSubmit={handleCreateTask} className="mt-4 space-y-3">
               <input
                 value={manualTask}
                 onChange={(e) => setManualTask(e.target.value)}
-                placeholder="Ex: Öppna rapporten och skriv rubriken"
+                placeholder="Ex: Förbered veckans kundmöte"
                 className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-violet-500"
                 maxLength={140}
                 required
@@ -182,22 +339,23 @@ export function MomentumDashboard() {
                 disabled={pendingAction !== "idle"}
                 className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {pendingAction === "creating" ? "Skapar..." : "Lägg till steg"}
+                {pendingAction === "creating" ? "Skapar..." : "Skapa uppgift"}
               </button>
             </form>
           </article>
 
           <article className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
-            <h2 className="text-lg font-medium text-zinc-100">AI Task Splitting</h2>
+            <h2 className="text-lg font-medium text-zinc-100">
+              AI Task Splitting
+            </h2>
             <p className="mt-1 text-sm text-zinc-400">
-              Skriv in en överväldigande uppgift så bryter AI ner den i hanterbara
-              5-15 minuterssteg.
+              AI föreslår steg, men du bestämmer när de ska sparas.
             </p>
             <form onSubmit={handleSplitTask} className="mt-4 space-y-3">
               <textarea
                 value={aiTask}
                 onChange={(e) => setAiTask(e.target.value)}
-                placeholder='Ex: "Skriv klart rapporten om Q1-resultat"'
+                placeholder='Ex: "Planera och genomför teammöte för nästa sprint"'
                 className="min-h-24 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-violet-500"
                 maxLength={200}
                 required
@@ -208,10 +366,46 @@ export function MomentumDashboard() {
                 className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {pendingAction === "splitting"
-                  ? "Bryter ner..."
-                  : "Bryt ned till mikro-steg"}
+                  ? "Tar fram förslag..."
+                  : "Generera AI-steg"}
               </button>
             </form>
+
+            {aiPreview && (
+              <div className="mt-4 rounded-xl border border-emerald-700/40 bg-emerald-900/20 p-4">
+                <p className="text-sm font-semibold text-emerald-200">
+                  Förslag för: {aiPreview.taskTitle}
+                </p>
+                <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-emerald-100/90">
+                  {aiPreview.steps.map((step, index) => (
+                    <li key={`${step.title}-${index}`}>
+                      {step.title} ({step.minutes} min)
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleSaveSplit();
+                    }}
+                    disabled={pendingAction !== "idle"}
+                    className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {pendingAction === "savingSplit"
+                      ? "Sparar..."
+                      : "Spara i planeringen"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAiPreview(null)}
+                    className="rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-200 transition hover:bg-zinc-800"
+                  >
+                    Förkasta förslag
+                  </button>
+                </div>
+              </div>
+            )}
           </article>
 
           <article className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
@@ -285,7 +479,9 @@ export function MomentumDashboard() {
             <dl className="mt-3 space-y-2 text-sm text-zinc-300">
               <div className="flex justify-between">
                 <dt>Aktiv användare</dt>
-                <dd className="truncate text-zinc-400">{user?.id ?? "Ingen"}</dd>
+                <dd className="truncate text-zinc-400">
+                  {user.email ?? user.id ?? "Ingen"}
+                </dd>
               </div>
               <div className="flex justify-between">
                 <dt>Totala steg</dt>
@@ -305,10 +501,12 @@ export function MomentumDashboard() {
       </section>
 
       <section className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5">
-        <h2 className="text-lg font-medium text-zinc-100">Dina mikro-uppgifter</h2>
+        <h2 className="text-lg font-medium text-zinc-100">
+          Dina mikro-uppgifter
+        </h2>
         {tasks.length === 0 ? (
           <p className="mt-3 text-sm text-zinc-400">
-            Inga uppgifter ännu. Lägg till ett steg eller använd AI Task Splitting.
+            Inga steg ännu. Skapa en uppgift eller använd AI Task Splitting.
           </p>
         ) : (
           <ul className="mt-4 space-y-2">
@@ -322,7 +520,11 @@ export function MomentumDashboard() {
                     type="checkbox"
                     checked={task.status === "done"}
                     onChange={(e) =>
-                      toggleTaskCompletion(task.id, e.target.checked).catch((err) =>
+                      toggleTaskCompletion(
+                        task.id,
+                        task.parentTaskId,
+                        e.target.checked
+                      ).catch((err) =>
                         setLocalMessage(
                           err instanceof Error
                             ? err.message
@@ -333,6 +535,9 @@ export function MomentumDashboard() {
                     className="mt-1 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-violet-500"
                   />
                   <span className="min-w-0">
+                    <span className="mb-1 block truncate text-xs font-medium uppercase tracking-wide text-zinc-500">
+                      {task.parentTaskTitle}
+                    </span>
                     <span
                       className={`block truncate text-sm ${
                         task.status === "done"
@@ -356,7 +561,7 @@ export function MomentumDashboard() {
                   type="button"
                   className="rounded-lg border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
                   onClick={() =>
-                    removeTask(task.id).catch((err) =>
+                    removeTask(task.id, task.parentTaskId).catch((err) =>
                       setLocalMessage(
                         err instanceof Error
                           ? err.message

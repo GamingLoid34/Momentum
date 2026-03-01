@@ -40,15 +40,24 @@ GEMINI_API_KEY=your-gemini-api-key
   - `POST /api/ai/split-task`
   - `POST /api/ai/vision-mode`
 
-## 3) Supabase setup (obligatoriskt)
+## 3) Supabase setup (obligatoriskt, steg-för-steg)
+
+Gör detta i Supabase Dashboard:
 
 1. Skapa ett Supabase-projekt.
-2. Gå till **Auth → Providers** och aktivera **Anonymous sign-ins**.
-3. Gå till **SQL Editor** och kör SQL från `supabase/schema.sql`.
-4. Hämta:
+2. Gå till **Connect** och kopiera:
    - `Project URL`
    - `anon public key`
-   och lägg in i `.env.local`.
+3. Klistra in värdena i `.env.local`.
+4. Gå till **SQL Editor** och kör hela filen `supabase/schema.sql`.
+5. Gå till **Auth → Sign In / Providers**:
+   - aktivera **Email**
+   - aktivera **Magic Link** (passwordless)
+6. Gå till **Auth → URL Configuration**:
+   - sätt **Site URL** till din utvecklingsurl (t.ex. `http://localhost:3000`)
+   - lägg till samma url i **Redirect URLs**
+
+Efter detta kommer första inloggade användaren automatiskt få ett eget team via `ensure_user_bootstrap`.
 
 ## 4) Kör appen
 
@@ -76,33 +85,49 @@ npm run start
 
 Öppna appen via HTTPS-url på mobil och installera från browsern.
 
-## 6) Deploy till Vercel (rekommenderat)
+## 6) Deploy till Vercel (rekommenderat, steg-för-steg)
 
-1. Importera repo i Vercel.
+Gör detta i Vercel:
+
+1. **New Project** → importera GitHub-repot.
 2. Sätt **Root Directory** till `momentum/`.
-3. Lägg in env vars i Vercel Project Settings:
+3. Lägg in Environment Variables:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `GEMINI_API_KEY`
-4. Deploy.
+4. Deploya.
 
-## 7) Egendomän (Vercel + Supabase)
+När deployment är klar: öppna app-url och testa login via magic link.
 
-1. I Vercel: **Settings → Domains → Add domain**.
-2. Lägg DNS-poster enligt Vercels instruktioner hos din domänleverantör.
-3. I Supabase: **Auth → URL Configuration**:
+## 7) Egendomän (Vercel + Supabase, steg-för-steg)
+
+1. I Vercel: **Project → Settings → Domains → Add**.
+2. Lägg de DNS-poster som Vercel visar hos din domänleverantör.
+3. Vänta tills domänen är verifierad och HTTPS är aktiv.
+4. Gå till Supabase: **Auth → URL Configuration**:
    - Site URL = `https://dindoman.se`
-   - Lägg även preview/staging-domäner i Redirect URLs vid behov.
+   - Redirect URLs:
+     - `https://dindoman.se`
+     - `https://www.dindoman.se` (om du använder www)
+     - ev. `https://<din-vercel-preview>.vercel.app` för testmiljö
+5. Testa login igen via e-postlänk på den riktiga domänen.
 
-## 8) Projektstruktur
+## 8) Vad som är implementerat i appen nu
+
+- E-postinloggning via Supabase Magic Link
+- Automatisk bootstrap av team/profile i Supabase (`ensure_user_bootstrap`)
+- Gemensam schema-bas för Koll + Momentum (`teams`, `profiles`, `tasks`, `subtasks`, m.m.)
+- AI Task Splitting i två steg:
+  1. generera förslag
+  2. användaren bekräftar innan steg sparas
+## 9) Projektstruktur
 
 - `src/lib/supabase.ts` – klientinitiering för Supabase
-- `src/context/MomentumContext.tsx` – auth + realtime tasks + actions
+- `src/context/MomentumContext.tsx` – email auth + realtime tasks + actions
 - `src/app/api/ai/split-task/route.ts` – Gemini textanalys
 - `src/app/api/ai/vision-mode/route.ts` – Gemini bildanalys
-- `supabase/schema.sql` – tabell + RLS policies
-
-## 9) Redo för senare Google Play
+- `supabase/schema.sql` – teammodell + tabeller + RLS + bootstrap-funktion
+## 10) Redo för senare Google Play
 
 1. Stabil webb/PWA-funktion först.
 2. Wrapper med **Capacitor** eller **Trusted Web Activity**.

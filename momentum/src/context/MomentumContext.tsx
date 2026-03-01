@@ -16,6 +16,8 @@ export type TaskStatus = "todo" | "done";
 export type MicroTask = {
   id: string;
   title: string;
+  parentTaskId: string;
+  parentTaskTitle: string;
   estimatedMinutes: number;
   status: TaskStatus;
   aiMotivation: string | null;
@@ -29,7 +31,7 @@ export type VisionFeedback = {
   encouragement: string;
 };
 
-type SplitTaskStep = {
+export type SplitTaskStep = {
   title: string;
   minutes: number;
   motivation?: string;
@@ -40,14 +42,22 @@ type MomentumContextValue = {
   tasks: MicroTask[];
   loading: boolean;
   supabaseReady: boolean;
+  emailAuthEnabled: boolean;
   error: string | null;
   visionFeedback: VisionFeedback | null;
   momentumScore: number;
   flowByHour: number[];
+  sendMagicLink: (email: string) => Promise<void>;
+  signOut: () => Promise<void>;
   createTask: (title: string, estimatedMinutes?: number) => Promise<void>;
-  splitTaskWithAI: (task: string) => Promise<void>;
-  toggleTaskCompletion: (taskId: string, complete: boolean) => Promise<void>;
-  removeTask: (taskId: string) => Promise<void>;
+  splitTaskWithAI: (task: string) => Promise<SplitTaskStep[]>;
+  saveSplitTask: (taskTitle: string, steps: SplitTaskStep[]) => Promise<void>;
+  toggleTaskCompletion: (
+    subtaskId: string,
+    parentTaskId: string,
+    complete: boolean
+  ) => Promise<void>;
+  removeTask: (subtaskId: string, parentTaskId: string) => Promise<void>;
   analyzeWithVisionMode: (
     imageDataUrl: string,
     goal?: string
@@ -55,12 +65,18 @@ type MomentumContextValue = {
   clearError: () => void;
 };
 
-type SupabaseMicroTaskRow = {
+type SupabaseTaskRow = {
   id: string;
-  user_id: string;
+  title: string;
+  team_id: string;
+};
+
+type SupabaseSubtaskRow = {
+  id: string;
+  task_id: string;
   title: string;
   estimated_minutes: number | null;
-  status: TaskStatus | null;
+  is_completed: boolean | null;
   ai_motivation: string | null;
   created_at: string;
   completed_at: string | null;
@@ -97,8 +113,11 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
   const services = useMemo(() => getSupabaseServices(), []);
   const { client: supabase, missingConfig } = services;
   const hasSupabaseConfigIssue = missingConfig.length > 0 || !supabase;
+  const supabaseReady = !hasSupabaseConfigIssue;
+  const emailAuthEnabled = true;
 
   const [user, setUser] = useState<User | null>(null);
+  const [teamId, setTeamId] = useState<string | null>(null);
   const [tasks, setTasks] = useState<MicroTask[]>([]);
   const [loading, setLoading] = useState(!hasSupabaseConfigIssue);
   const [error, setError] = useState<string | null>(
@@ -109,7 +128,6 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
   const [visionFeedback, setVisionFeedback] = useState<VisionFeedback | null>(
     null
   );
-  const supabaseReady = !hasSupabaseConfigIssue;
 
   useEffect(() => {
     if (!supabaseReady || !supabase) {
@@ -130,29 +148,15 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       }
 
       const sessionUser = data.session?.user ?? null;
-      if (sessionUser) {
-        setUser(sessionUser);
-        setLoading(true);
-        return;
-      }
+      setUser(sessionUser);
 
-      const { data: anonData, error: anonError } =
-        await supabase.auth.signInAnonymously();
-      if (!isSubscribed) {
-        return;
-      }
-
-      if (anonError) {
-        setError(
-          anonError.message ||
-            "Kunde inte logga in anonymt i Supabase. Kontrollera Auth-inställningarna."
-        );
+      if (!sessionUser) {
+        setTeamId(null);
+        setTasks([]);
         setLoading(false);
-        return;
+      } else {
+        setLoading(true);
       }
-
-      setUser(anonData.user ?? null);
-      setLoading(true);
     };
 
     void bootstrapAuth();
@@ -160,8 +164,11 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (!session?.user) {
+      const nextUser = session?.user ?? null;
+      setUser(nextUser);
+
+      if (!nextUser) {
+        setTeamId(null);
         setTasks([]);
         setLoading(false);
         return;
@@ -182,37 +189,111 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     }
 
     let isSubscribed = true;
+    const bootstrapTeam = async () => {
+      setLoading(true);
+
+      const preferredDisplayName = user.email?.split("@")[0] ?? null;
+      const { data, error: bootstrapError } = await supabase.rpc(
+        "ensure_user_bootstrap",
+        {
+          input_display_name: preferredDisplayName,
+        }
+      );
+
+      if (!isSubscribed) {
+        return;
+      }
+
+      if (bootstrapError) {
+        setError(bootstrapError.message);
+        setLoading(false);
+        return;
+      }
+
+      if (!data || typeof data !== "string") {
+        setError(
+          "Kunde inte hitta team för användaren. Kontrollera Supabase SQL-setup."
+        );
+        setLoading(false);
+        return;
+      }
+
+      setTeamId(data);
+    };
+
+    void bootstrapTeam();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [supabase, supabaseReady, user]);
+
+  useEffect(() => {
+    if (!supabaseReady || !supabase || !teamId) {
+      return;
+    }
+
+    let isSubscribed = true;
+
     const fetchTasks = async () => {
-      const { data, error: fetchError } = await supabase
-        .from("micro_tasks")
-        .select(
-          "id, user_id, title, estimated_minutes, status, ai_motivation, created_at, completed_at"
-        )
-        .eq("user_id", user.id)
+      const { data: taskRows, error: taskError } = await supabase
+        .from("tasks")
+        .select("id, title, team_id")
+        .eq("team_id", teamId)
         .order("created_at", { ascending: true });
 
       if (!isSubscribed) {
         return;
       }
 
-      if (fetchError) {
-        setError(fetchError.message);
+      if (taskError) {
+        setError(taskError.message);
         setLoading(false);
         return;
       }
 
-      const nextTasks = (data ?? []).map((task) => {
-        const row = task as SupabaseMicroTaskRow;
-        return {
+      const typedTaskRows = (taskRows ?? []) as SupabaseTaskRow[];
+      if (typedTaskRows.length === 0) {
+        setTasks([]);
+        setLoading(false);
+        return;
+      }
+
+      const taskIds = typedTaskRows.map((taskRow) => taskRow.id);
+      const taskNameById = new Map(typedTaskRows.map((row) => [row.id, row.title]));
+
+      const { data: subtaskRows, error: subtaskError } = await supabase
+        .from("subtasks")
+        .select(
+          "id, task_id, title, estimated_minutes, is_completed, ai_motivation, created_at, completed_at"
+        )
+        .in("task_id", taskIds)
+        .order("created_at", { ascending: true });
+
+      if (!isSubscribed) {
+        return;
+      }
+
+      if (subtaskError) {
+        setError(subtaskError.message);
+        setLoading(false);
+        return;
+      }
+
+      const nextTasks = ((subtaskRows ?? []) as SupabaseSubtaskRow[]).map(
+        (row) => ({
           id: row.id,
-          title: row.title ?? "Untitled task",
+          title: row.title ?? "Untitled step",
+          parentTaskId: row.task_id,
+          parentTaskTitle:
+            taskNameById.get(row.task_id) ?? "Uppgift utan rubrik",
           estimatedMinutes: normalizeMinutes(row.estimated_minutes ?? 10),
-          status: row.status === "done" ? "done" : "todo",
+          status: row.is_completed ? "done" : "todo",
           aiMotivation: row.ai_motivation,
           createdAt: row.created_at,
           completedAt: row.completed_at,
-        } satisfies MicroTask;
-      });
+        })
+      );
 
       setTasks(nextTasks);
       setLoading(false);
@@ -221,14 +302,25 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     void fetchTasks();
 
     const channel = supabase
-      .channel(`micro-tasks-${user.id}`)
+      .channel(`team-${teamId}-tasks`)
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
-          table: "micro_tasks",
-          filter: `user_id=eq.${user.id}`,
+          table: "tasks",
+          filter: `team_id=eq.${teamId}`,
+        },
+        () => {
+          void fetchTasks();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "subtasks",
         },
         () => {
           void fetchTasks();
@@ -244,10 +336,10 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       isSubscribed = false;
       void supabase.removeChannel(channel);
     };
-  }, [supabase, supabaseReady, user]);
+  }, [supabase, supabaseReady, teamId]);
 
   const guardOperational = useCallback(() => {
-    if (!supabaseReady || !supabase || !user) {
+    if (!supabaseReady || !supabase || !user || !teamId) {
       throw new Error(
         "Momentum är inte redo ännu. Vänta tills Supabase-synken är igång."
       );
@@ -256,8 +348,85 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
     return {
       supabase,
       userId: user.id,
+      teamId,
     };
-  }, [supabase, supabaseReady, user]);
+  }, [supabase, supabaseReady, teamId, user]);
+
+  const syncParentTaskStatus = useCallback(
+    async (parentTaskId: string) => {
+      const { supabase: activeSupabase } = guardOperational();
+      const { data: childRows, error: childError } = await activeSupabase
+        .from("subtasks")
+        .select("id, is_completed")
+        .eq("task_id", parentTaskId);
+
+      if (childError) {
+        throw new Error(childError.message);
+      }
+
+      const rows = childRows ?? [];
+      if (rows.length === 0) {
+        return;
+      }
+
+      const completedCount = rows.filter((row) => row.is_completed).length;
+      const allDone = completedCount === rows.length;
+      const anyDone = completedCount > 0;
+
+      const { error: updateTaskError } = await activeSupabase
+        .from("tasks")
+        .update({
+          status: allDone ? "done" : anyDone ? "in_progress" : "todo",
+          completed_at: allDone ? new Date().toISOString() : null,
+        })
+        .eq("id", parentTaskId);
+
+      if (updateTaskError) {
+        throw new Error(updateTaskError.message);
+      }
+    },
+    [guardOperational]
+  );
+
+  const sendMagicLink = useCallback(
+    async (email: string) => {
+      const normalizedEmail = email.trim().toLowerCase();
+      if (!normalizedEmail || !normalizedEmail.includes("@")) {
+        throw new Error("Ange en giltig e-postadress.");
+      }
+
+      if (!supabaseReady || !supabase) {
+        throw new Error("Supabase är inte redo ännu.");
+      }
+
+      const emailRedirectTo =
+        typeof window !== "undefined" ? `${window.location.origin}/` : undefined;
+
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        email: normalizedEmail,
+        options: { emailRedirectTo },
+      });
+
+      if (otpError) {
+        throw new Error(otpError.message);
+      }
+    },
+    [supabase, supabaseReady]
+  );
+
+  const signOut = useCallback(async () => {
+    if (!supabaseReady || !supabase) {
+      return;
+    }
+
+    const { error: signOutError } = await supabase.auth.signOut();
+    if (signOutError) {
+      throw new Error(signOutError.message);
+    }
+
+    setTasks([]);
+    setTeamId(null);
+  }, [supabase, supabaseReady]);
 
   const createTask = useCallback(
     async (title: string, estimatedMinutes = DEFAULT_STEP_MINUTES) => {
@@ -266,19 +435,51 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
         throw new Error("Task title cannot be empty.");
       }
 
-      const { supabase: activeSupabase, userId } = guardOperational();
-      const { error: insertError } = await activeSupabase
-        .from("micro_tasks")
+      const { supabase: activeSupabase, userId, teamId: activeTeamId } =
+        guardOperational();
+
+      const { data: createdTask, error: taskInsertError } = await activeSupabase
+        .from("tasks")
         .insert({
+          team_id: activeTeamId,
+          title: sanitizedTitle,
+          description: "",
+          created_by: userId,
+          source: "app",
+          status: "todo",
+        })
+        .select("id")
+        .single();
+
+      if (taskInsertError || !createdTask?.id) {
+        throw new Error(taskInsertError?.message ?? "Kunde inte skapa uppgift.");
+      }
+
+      const parentTaskId = createdTask.id as string;
+
+      const { error: assignError } = await activeSupabase
+        .from("task_assignees")
+        .insert({
+          task_id: parentTaskId,
           user_id: userId,
+          is_main: true,
+        });
+      if (assignError) {
+        throw new Error(assignError.message);
+      }
+
+      const { error: stepInsertError } = await activeSupabase
+        .from("subtasks")
+        .insert({
+          task_id: parentTaskId,
           title: sanitizedTitle,
           estimated_minutes: normalizeMinutes(estimatedMinutes),
-          status: "todo",
+          is_completed: false,
           ai_motivation: null,
+          sort_order: 0,
         });
-
-      if (insertError) {
-        throw new Error(insertError.message);
+      if (stepInsertError) {
+        throw new Error(stepInsertError.message);
       }
     },
     [guardOperational]
@@ -286,7 +487,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
 
   const splitTaskWithAI = useCallback(
     async (task: string) => {
-      const { supabase: activeSupabase, userId } = guardOperational();
+      guardOperational();
       const taskTitle = task.trim();
 
       if (taskTitle.length < 3) {
@@ -318,57 +519,133 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
         throw new Error("AI returnerade inga steg.");
       }
 
-      const rows = steps.map((step) => ({
-        user_id: userId,
+      return steps.map((step) => ({
+        title: step.title.trim(),
+        minutes: normalizeMinutes(step.minutes),
+        motivation: step.motivation?.trim() ?? undefined,
+      }));
+    },
+    [guardOperational]
+  );
+
+  const saveSplitTask = useCallback(
+    async (taskTitle: string, steps: SplitTaskStep[]) => {
+      const normalizedTitle = taskTitle.trim();
+      if (!normalizedTitle) {
+        throw new Error("Uppgiften behöver en rubrik.");
+      }
+      if (steps.length === 0) {
+        throw new Error("Det finns inga AI-steg att spara.");
+      }
+
+      const { supabase: activeSupabase, userId, teamId: activeTeamId } =
+        guardOperational();
+
+      const { data: createdTask, error: taskInsertError } = await activeSupabase
+        .from("tasks")
+        .insert({
+          team_id: activeTeamId,
+          title: normalizedTitle,
+          description: "",
+          created_by: userId,
+          source: "ai",
+          status: "todo",
+        })
+        .select("id")
+        .single();
+
+      if (taskInsertError || !createdTask?.id) {
+        throw new Error(taskInsertError?.message ?? "Kunde inte skapa AI-uppgift.");
+      }
+
+      const parentTaskId = createdTask.id as string;
+
+      const { error: assignError } = await activeSupabase
+        .from("task_assignees")
+        .insert({
+          task_id: parentTaskId,
+          user_id: userId,
+          is_main: true,
+        });
+      if (assignError) {
+        throw new Error(assignError.message);
+      }
+
+      const rows = steps.map((step, index) => ({
+        task_id: parentTaskId,
         title: step.title.trim(),
         estimated_minutes: normalizeMinutes(step.minutes),
-        status: "todo",
+        is_completed: false,
         ai_motivation: step.motivation?.trim() ?? null,
+        sort_order: index,
       }));
 
-      const { error: insertError } = await activeSupabase
-        .from("micro_tasks")
+      const { error: subtasksInsertError } = await activeSupabase
+        .from("subtasks")
         .insert(rows);
-      if (insertError) {
-        throw new Error(insertError.message);
+      if (subtasksInsertError) {
+        throw new Error(subtasksInsertError.message);
       }
     },
     [guardOperational]
   );
 
   const toggleTaskCompletion = useCallback(
-    async (taskId: string, complete: boolean) => {
-      const { supabase: activeSupabase, userId } = guardOperational();
+    async (subtaskId: string, parentTaskId: string, complete: boolean) => {
+      const { supabase: activeSupabase } = guardOperational();
       const { error: updateError } = await activeSupabase
-        .from("micro_tasks")
+        .from("subtasks")
         .update({
-          status: complete ? "done" : "todo",
+          is_completed: complete,
           completed_at: complete ? new Date().toISOString() : null,
         })
-        .eq("id", taskId)
-        .eq("user_id", userId);
+        .eq("id", subtaskId)
+        .eq("task_id", parentTaskId);
 
       if (updateError) {
         throw new Error(updateError.message);
       }
+
+      await syncParentTaskStatus(parentTaskId);
     },
-    [guardOperational]
+    [guardOperational, syncParentTaskStatus]
   );
 
   const removeTask = useCallback(
-    async (taskId: string) => {
-      const { supabase: activeSupabase, userId } = guardOperational();
+    async (subtaskId: string, parentTaskId: string) => {
+      const { supabase: activeSupabase } = guardOperational();
       const { error: deleteError } = await activeSupabase
-        .from("micro_tasks")
+        .from("subtasks")
         .delete()
-        .eq("id", taskId)
-        .eq("user_id", userId);
+        .eq("id", subtaskId)
+        .eq("task_id", parentTaskId);
 
       if (deleteError) {
         throw new Error(deleteError.message);
       }
+
+      const { count, error: countError } = await activeSupabase
+        .from("subtasks")
+        .select("id", { count: "exact", head: true })
+        .eq("task_id", parentTaskId);
+      if (countError) {
+        throw new Error(countError.message);
+      }
+
+      if ((count ?? 0) === 0) {
+        const { error: parentDeleteError } = await activeSupabase
+          .from("tasks")
+          .delete()
+          .eq("id", parentTaskId);
+        if (parentDeleteError) {
+          throw new Error(parentDeleteError.message);
+        }
+        return;
+      }
+
+      await syncParentTaskStatus(parentTaskId);
     },
-    [guardOperational]
+    [guardOperational, syncParentTaskStatus]
   );
 
   const analyzeWithVisionMode = useCallback(
@@ -437,12 +714,16 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       tasks,
       loading,
       supabaseReady,
+      emailAuthEnabled,
       error,
       visionFeedback,
       momentumScore,
       flowByHour,
+      sendMagicLink,
+      signOut,
       createTask,
       splitTaskWithAI,
+      saveSplitTask,
       toggleTaskCompletion,
       removeTask,
       analyzeWithVisionMode,
@@ -452,11 +733,15 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       analyzeWithVisionMode,
       clearError,
       createTask,
+      emailAuthEnabled,
       error,
       flowByHour,
       loading,
       momentumScore,
       removeTask,
+      saveSplitTask,
+      sendMagicLink,
+      signOut,
       splitTaskWithAI,
       supabaseReady,
       tasks,
