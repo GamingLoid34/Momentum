@@ -27,7 +27,7 @@ export function MomentumDashboard() {
     user,
     tasks,
     loading,
-    firebaseReady,
+    supabaseReady,
     error,
     visionFeedback,
     momentumScore,
@@ -135,9 +135,9 @@ export function MomentumDashboard() {
         <InstallPwaButton />
       </header>
 
-      {!firebaseReady && (
+      {!supabaseReady && (
         <section className="rounded-2xl border border-amber-600/30 bg-amber-900/20 p-4 text-sm text-amber-100">
-          Firebase är inte konfigurerat ännu. Lägg in värden i{" "}
+          Supabase är inte konfigurerat ännu. Lägg in värden i{" "}
           <code className="rounded bg-black/40 px-1.5 py-0.5">.env.local</code>{" "}
           enligt <code className="rounded bg-black/40 px-1.5 py-0.5">.env.example</code>.
         </section>
@@ -285,7 +285,7 @@ export function MomentumDashboard() {
             <dl className="mt-3 space-y-2 text-sm text-zinc-300">
               <div className="flex justify-between">
                 <dt>Aktiv användare</dt>
-                <dd className="truncate text-zinc-400">{user?.uid ?? "Ingen"}</dd>
+                <dd className="truncate text-zinc-400">{user?.id ?? "Ingen"}</dd>
               </div>
               <div className="flex justify-between">
                 <dt>Totala steg</dt>

@@ -38,7 +38,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Never cache AI/Firebase API responses to avoid stale or sensitive data.
+  // Never cache API responses to avoid stale or sensitive data.
   if (url.pathname.startsWith("/api/")) {
     return;
   }

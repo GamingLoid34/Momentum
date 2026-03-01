@@ -8,21 +8,8 @@ import {
   useMemo,
   useState,
 } from "react";
-import { User, onAuthStateChanged, signInAnonymously } from "firebase/auth";
-import {
-  Timestamp,
-  addDoc,
-  collection,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  updateDoc,
-  writeBatch,
-} from "firebase/firestore";
-import { getFirebaseServices } from "@/firebase";
+import { User } from "@supabase/supabase-js";
+import { getSupabaseServices } from "@/lib/supabase";
 
 export type TaskStatus = "todo" | "done";
 
@@ -52,7 +39,7 @@ type MomentumContextValue = {
   user: User | null;
   tasks: MicroTask[];
   loading: boolean;
-  firebaseReady: boolean;
+  supabaseReady: boolean;
   error: string | null;
   visionFeedback: VisionFeedback | null;
   momentumScore: number;
@@ -68,13 +55,15 @@ type MomentumContextValue = {
   clearError: () => void;
 };
 
-type FirestoreMicroTask = {
-  title?: string;
-  estimatedMinutes?: number;
-  status?: TaskStatus;
-  aiMotivation?: string;
-  createdAt?: Timestamp;
-  completedAt?: Timestamp | null;
+type SupabaseMicroTaskRow = {
+  id: string;
+  user_id: string;
+  title: string;
+  estimated_minutes: number | null;
+  status: TaskStatus | null;
+  ai_motivation: string | null;
+  created_at: string;
+  completed_at: string | null;
 };
 
 const DEFAULT_STEP_MINUTES = 10;
@@ -90,15 +79,10 @@ function normalizeMinutes(value?: number) {
     return DEFAULT_STEP_MINUTES;
   }
 
-  return Math.min(MAX_STEP_MINUTES, Math.max(MIN_STEP_MINUTES, Math.round(value)));
-}
-
-function timestampToIso(value?: Timestamp | null) {
-  if (!value) {
-    return null;
-  }
-
-  return value.toDate().toISOString();
+  return Math.min(
+    MAX_STEP_MINUTES,
+    Math.max(MIN_STEP_MINUTES, Math.round(value))
+  );
 }
 
 function isSameDay(a: Date, b: Date) {
@@ -110,31 +94,74 @@ function isSameDay(a: Date, b: Date) {
 }
 
 export function MomentumProvider({ children }: { children: React.ReactNode }) {
-  const services = useMemo(() => getFirebaseServices(), []);
-  const { auth, db, missingConfig } = services;
-  const hasFirebaseConfigIssue = missingConfig.length > 0 || !auth || !db;
+  const services = useMemo(() => getSupabaseServices(), []);
+  const { client: supabase, missingConfig } = services;
+  const hasSupabaseConfigIssue = missingConfig.length > 0 || !supabase;
 
   const [user, setUser] = useState<User | null>(null);
   const [tasks, setTasks] = useState<MicroTask[]>([]);
-  const [loading, setLoading] = useState(!hasFirebaseConfigIssue);
+  const [loading, setLoading] = useState(!hasSupabaseConfigIssue);
   const [error, setError] = useState<string | null>(
-    hasFirebaseConfigIssue
-      ? "Firebase är inte korrekt konfigurerat. Kontrollera .env.local och följ README."
+    hasSupabaseConfigIssue
+      ? "Supabase är inte korrekt konfigurerat. Kontrollera .env.local och följ README."
       : null
   );
   const [visionFeedback, setVisionFeedback] = useState<VisionFeedback | null>(
     null
   );
-  const firebaseReady = !hasFirebaseConfigIssue;
+  const supabaseReady = !hasSupabaseConfigIssue;
 
   useEffect(() => {
-    if (!firebaseReady || !auth) {
+    if (!supabaseReady || !supabase) {
       return;
     }
 
-    const unsubscribe = onAuthStateChanged(auth, (authUser) => {
-      setUser(authUser);
-      if (!authUser) {
+    let isSubscribed = true;
+    const bootstrapAuth = async () => {
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      if (!isSubscribed) {
+        return;
+      }
+
+      if (sessionError) {
+        setError(sessionError.message);
+        setLoading(false);
+        return;
+      }
+
+      const sessionUser = data.session?.user ?? null;
+      if (sessionUser) {
+        setUser(sessionUser);
+        setLoading(true);
+        return;
+      }
+
+      const { data: anonData, error: anonError } =
+        await supabase.auth.signInAnonymously();
+      if (!isSubscribed) {
+        return;
+      }
+
+      if (anonError) {
+        setError(
+          anonError.message ||
+            "Kunde inte logga in anonymt i Supabase. Kontrollera Auth-inställningarna."
+        );
+        setLoading(false);
+        return;
+      }
+
+      setUser(anonData.user ?? null);
+      setLoading(true);
+    };
+
+    void bootstrapAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (!session?.user) {
         setTasks([]);
         setLoading(false);
         return;
@@ -143,69 +170,94 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       setLoading(true);
     });
 
-    if (!auth.currentUser) {
-      signInAnonymously(auth).catch((authError) => {
-        setError(
-          authError instanceof Error
-            ? authError.message
-            : "Kunde inte logga in anonymt i Firebase."
-        );
-      });
-    }
-
-    return unsubscribe;
-  }, [auth, firebaseReady]);
+    return () => {
+      isSubscribed = false;
+      subscription.unsubscribe();
+    };
+  }, [supabase, supabaseReady]);
 
   useEffect(() => {
-    if (!firebaseReady || !db || !user) {
+    if (!supabaseReady || !supabase || !user) {
       return;
     }
 
-    const tasksRef = collection(db, "users", user.uid, "microTasks");
-    const tasksQuery = query(tasksRef, orderBy("createdAt", "asc"));
+    let isSubscribed = true;
+    const fetchTasks = async () => {
+      const { data, error: fetchError } = await supabase
+        .from("micro_tasks")
+        .select(
+          "id, user_id, title, estimated_minutes, status, ai_motivation, created_at, completed_at"
+        )
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
 
-    const unsubscribe = onSnapshot(
-      tasksQuery,
-      (snapshot) => {
-        const nextTasks = snapshot.docs.map((taskDoc) => {
-          const data = taskDoc.data() as FirestoreMicroTask;
-
-          return {
-            id: taskDoc.id,
-            title: data.title ?? "Untitled task",
-            estimatedMinutes: normalizeMinutes(data.estimatedMinutes),
-            status: data.status === "done" ? "done" : "todo",
-            aiMotivation: data.aiMotivation ?? null,
-            createdAt:
-              timestampToIso(data.createdAt) ?? new Date().toISOString(),
-            completedAt: timestampToIso(data.completedAt),
-          } satisfies MicroTask;
-        });
-
-        setTasks(nextTasks);
-        setLoading(false);
-      },
-      (snapshotError) => {
-        setError(snapshotError.message);
-        setLoading(false);
+      if (!isSubscribed) {
+        return;
       }
-    );
 
-    return unsubscribe;
-  }, [db, firebaseReady, user]);
+      if (fetchError) {
+        setError(fetchError.message);
+        setLoading(false);
+        return;
+      }
+
+      const nextTasks = (data ?? []).map((task) => {
+        const row = task as SupabaseMicroTaskRow;
+        return {
+          id: row.id,
+          title: row.title ?? "Untitled task",
+          estimatedMinutes: normalizeMinutes(row.estimated_minutes ?? 10),
+          status: row.status === "done" ? "done" : "todo",
+          aiMotivation: row.ai_motivation,
+          createdAt: row.created_at,
+          completedAt: row.completed_at,
+        } satisfies MicroTask;
+      });
+
+      setTasks(nextTasks);
+      setLoading(false);
+    };
+
+    void fetchTasks();
+
+    const channel = supabase
+      .channel(`micro-tasks-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "micro_tasks",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          void fetchTasks();
+        }
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR") {
+          setError("Realtime-anslutning till Supabase misslyckades.");
+        }
+      });
+
+    return () => {
+      isSubscribed = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [supabase, supabaseReady, user]);
 
   const guardOperational = useCallback(() => {
-    if (!firebaseReady || !db || !user) {
+    if (!supabaseReady || !supabase || !user) {
       throw new Error(
-        "Momentum är inte redo ännu. Vänta tills Firebase-synken är igång."
+        "Momentum är inte redo ännu. Vänta tills Supabase-synken är igång."
       );
     }
 
     return {
-      db,
-      uid: user.uid,
+      supabase,
+      userId: user.id,
     };
-  }, [db, firebaseReady, user]);
+  }, [supabase, supabaseReady, user]);
 
   const createTask = useCallback(
     async (title: string, estimatedMinutes = DEFAULT_STEP_MINUTES) => {
@@ -214,22 +266,27 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
         throw new Error("Task title cannot be empty.");
       }
 
-      const { db: activeDb, uid } = guardOperational();
-      await addDoc(collection(activeDb, "users", uid, "microTasks"), {
-        title: sanitizedTitle,
-        estimatedMinutes: normalizeMinutes(estimatedMinutes),
-        status: "todo",
-        aiMotivation: null,
-        createdAt: serverTimestamp(),
-        completedAt: null,
-      });
+      const { supabase: activeSupabase, userId } = guardOperational();
+      const { error: insertError } = await activeSupabase
+        .from("micro_tasks")
+        .insert({
+          user_id: userId,
+          title: sanitizedTitle,
+          estimated_minutes: normalizeMinutes(estimatedMinutes),
+          status: "todo",
+          ai_motivation: null,
+        });
+
+      if (insertError) {
+        throw new Error(insertError.message);
+      }
     },
     [guardOperational]
   );
 
   const splitTaskWithAI = useCallback(
     async (task: string) => {
-      const { db: activeDb, uid } = guardOperational();
+      const { supabase: activeSupabase, userId } = guardOperational();
       const taskTitle = task.trim();
 
       if (taskTitle.length < 3) {
@@ -261,41 +318,55 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
         throw new Error("AI returnerade inga steg.");
       }
 
-      const batch = writeBatch(activeDb);
-      const userTasksCollection = collection(activeDb, "users", uid, "microTasks");
+      const rows = steps.map((step) => ({
+        user_id: userId,
+        title: step.title.trim(),
+        estimated_minutes: normalizeMinutes(step.minutes),
+        status: "todo",
+        ai_motivation: step.motivation?.trim() ?? null,
+      }));
 
-      steps.forEach((step) => {
-        const taskRef = doc(userTasksCollection);
-        batch.set(taskRef, {
-          title: step.title.trim(),
-          estimatedMinutes: normalizeMinutes(step.minutes),
-          status: "todo",
-          aiMotivation: step.motivation?.trim() ?? null,
-          createdAt: serverTimestamp(),
-          completedAt: null,
-        });
-      });
-
-      await batch.commit();
+      const { error: insertError } = await activeSupabase
+        .from("micro_tasks")
+        .insert(rows);
+      if (insertError) {
+        throw new Error(insertError.message);
+      }
     },
     [guardOperational]
   );
 
   const toggleTaskCompletion = useCallback(
     async (taskId: string, complete: boolean) => {
-      const { db: activeDb, uid } = guardOperational();
-      await updateDoc(doc(activeDb, "users", uid, "microTasks", taskId), {
-        status: complete ? "done" : "todo",
-        completedAt: complete ? serverTimestamp() : null,
-      });
+      const { supabase: activeSupabase, userId } = guardOperational();
+      const { error: updateError } = await activeSupabase
+        .from("micro_tasks")
+        .update({
+          status: complete ? "done" : "todo",
+          completed_at: complete ? new Date().toISOString() : null,
+        })
+        .eq("id", taskId)
+        .eq("user_id", userId);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
     },
     [guardOperational]
   );
 
   const removeTask = useCallback(
     async (taskId: string) => {
-      const { db: activeDb, uid } = guardOperational();
-      await deleteDoc(doc(activeDb, "users", uid, "microTasks", taskId));
+      const { supabase: activeSupabase, userId } = guardOperational();
+      const { error: deleteError } = await activeSupabase
+        .from("micro_tasks")
+        .delete()
+        .eq("id", taskId)
+        .eq("user_id", userId);
+
+      if (deleteError) {
+        throw new Error(deleteError.message);
+      }
     },
     [guardOperational]
   );
@@ -365,7 +436,7 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       user,
       tasks,
       loading,
-      firebaseReady,
+      supabaseReady,
       error,
       visionFeedback,
       momentumScore,
@@ -382,12 +453,12 @@ export function MomentumProvider({ children }: { children: React.ReactNode }) {
       clearError,
       createTask,
       error,
-      firebaseReady,
       flowByHour,
       loading,
       momentumScore,
       removeTask,
       splitTaskWithAI,
+      supabaseReady,
       tasks,
       toggleTaskCompletion,
       user,

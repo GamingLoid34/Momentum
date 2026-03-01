@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Momentum | Din AI-coach för fokus",
   description:
-    "Momentum hjälper dig att övervinna prokrastinering med AI Task Splitting, Vision Mode och realtidssynk via Firebase.",
+    "Momentum hjälper dig att övervinna prokrastinering med AI Task Splitting, Vision Mode och realtidssynk via Supabase.",
   applicationName: "Momentum",
   manifest: "/manifest.webmanifest",
   icons: {
